@@ -1,0 +1,22 @@
+{
+  "opt-1.3b": {
+    "name": "opt-1.3b",
+    "hf_id": "facebook/opt-1.3b",
+    "params": 1.3,
+    "tp": 1
+  },
+  "gemma-2b-it": {
+    "name": "gemma-2b-it",
+    "hf_id": "google/gemma-2b-it",
+    "params": 2.0,
+    "needs_trust": true,
+    "tp": 1
+  },
+  "phi-2": {
+    "name": "phi-2",
+    "hf_id": "microsoft/phi-2",
+    "params": 2.7,
+    "needs_trust": true,
+    "tp": 1
+  }
+}

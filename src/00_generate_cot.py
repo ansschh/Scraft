@@ -40,16 +40,18 @@ if __name__ == "__main__":
 
 # Build prompt template - keeping CoT start marker outside user text
 def build_prompt(question, options=None):
+    """Build a CoT prompt for the given question and options."""
+    prompt = "Question: " + question + "\n"
     if options:
-        prompt = f"""Question: {question}
-
-Options: {options}
-
-Think step-by-step to solve this problem."""
-    else:
-        prompt = f"""Question: {question}
-
-Think step-by-step to solve this problem."""
+        # Handle both string and list formats for options
+        if isinstance(options, list):
+            options_text = "\n".join(options)
+        else:
+            options_text = options
+        prompt += "Options:\n" + options_text + "\n"
+    
+    # Add explicit chain-of-thought instruction
+    prompt += "\nLet's solve this step-by-step:\n1. "
     return prompt
 
 def main():
@@ -95,9 +97,10 @@ def main():
     
     # Set sampling parameters for generation
     sampling_params = SamplingParams(
-        temperature=0.0,  # greedy decoding
-        max_tokens=512,
-        stop=["Question:", "\n\n"],  # Stop generation at these tokens
+        temperature=0.4,  # light temperature for better reasoning
+        top_p=0.95,  # nucleus sampling
+        max_tokens=1024,  # allow longer responses for complete reasoning
+        stop=["Question:", "\n\n\n"],  # Less aggressive stopping
     )
     
     # Process each model

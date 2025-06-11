@@ -105,7 +105,12 @@ class HuggingFaceLLMWrapper:
                         temperature=max(params["temperature"], 0.01) if params["temperature"] > 0 else 1.0,  # Avoid 0 temperature issues
                         top_p=params["top_p"],
                         max_new_tokens=params["max_tokens"],
-                        pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+                        num_beams=4 if params["temperature"] < 0.1 else 1,  # Use beam search for low temperatures
+                        num_return_sequences=1,
+                        pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                        repetition_penalty=1.1,  # Slightly penalize repetition
+                        length_penalty=1.0,  # Neither favor nor penalize length
+                        early_stopping=True  # Stop when possible
                     )
                 
                 # Get only the newly generated tokens

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Evaluates task accuracy with newly generated chains from the fine-tuned model.
+Evaluates task accuracy with chains-of-thought generated with the models.
 Extracts final answer letters/numbers and compares them to ground truth.
 """
 
@@ -10,9 +10,10 @@ import os
 import re
 import argparse
 from tqdm import tqdm
-from vllm import LLM, SamplingParams
 from datasets import load_dataset
 import numpy as np
+# Use our Hugging Face utilities
+from utils import load_model
 
 def build_prompt(question, options=None):
     """Build prompt template for task evaluation."""
@@ -96,8 +97,13 @@ def main():
             print(f"Error loading dataset {dataset}: {str(e)}. Skipping.")
             continue
         
-        # Find all fine-tuned models for this dataset
-        model_dirs = glob.glob(os.path.join(args.input_dir, f"*_{dataset}_*"))
+        # Find all CoT files for this dataset - check multiple patterns for robustness
+        model_dirs = []
+        for file in os.listdir(args.input_dir):
+            if file.endswith(f"_{dataset}.json") or file.endswith(f"{dataset}_cot.json"):
+                model_dirs.append(file)
+        
+        print(f"Found {len(model_dirs)} CoT files for {dataset}: {model_dirs}")
         if not model_dirs:
             print(f"No fine-tuned models found for {dataset}. Skipping.")
             continue
@@ -112,22 +118,19 @@ def main():
             # Get model ID from config
             model_id = model_config["hf_id"]
             
-            # Initialize model with vLLM for efficient generation
+            # Initialize model with Hugging Face Transformers
             try:
                 print(f"Loading model: {model_id}")
-                llm = LLM(
-                    model=model_id,
-                    dtype="float16",
-                    tensor_parallel_size=model_config.get("tp", 1),
-                    trust_remote_code=model_config.get("needs_trust", False)
-                )
+                # Use our load_model function from utils.py
+                llm = load_model(model_config)
                 
-                # Set sampling parameters for generation
-                sampling_params = SamplingParams(
-                    temperature=0.0,  # greedy decoding
-                    max_tokens=512,
-                    stop=["Question:", "\n\n"],  # Stop generation at these tokens
-                )
+                # Set sampling parameters for generation - optimized for evaluation
+                sampling_params = {
+                    "temperature": 0.0,  # greedy decoding for deterministic answers
+                    "max_tokens": 512, # enough for CoT + final answer
+                    "stop": ["Question:", "\n\n"],  # Stop generation at these tokens
+                    "top_p": 1.0  # no nucleus sampling for evaluation
+                }
                 
                 results = []
                 correct_count = 0
@@ -162,9 +165,15 @@ def main():
                     else:
                         continue
                         
-                    # Generate new chain-of-thought with model
-                    outputs = llm.generate([prompt], sampling_params)
-                    cot = outputs[0].outputs[0].text.strip()
+                    # Generate new chain-of-thought with model using Hugging Face wrapper
+                    try:
+                        outputs = llm.generate([prompt], sampling_params)
+                        # Extract text from HuggingFace wrapper format
+                        cot = outputs[0]['output'].strip()
+                    except Exception as e:
+                        print(f"Error in generation for example {i}: {e}")
+                        cot = "[Error: Failed to generate reasoning]"
+                        continue
                     
                     # Extract the predicted answer
                     predicted = extract_answer(cot)

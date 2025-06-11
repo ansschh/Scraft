@@ -28,17 +28,15 @@ def load_model(cfg):
         "tensor_parallel_size": tp_size
     }
     
-    # Add quantization config for large models
-    if cfg.get("load_4bit", True):
-        model_kwargs.update({
-            "dtype": "float16", 
-            "load_in_4bit": True,
-            "quantization_config": {
-                "load_in_4bit": True,
-                "bnb_4bit_compute_dtype": "float16"
-            }
-        })
-    else:
+    # Configure dtype - vLLM versions before 0.3.0 don't support 4-bit quantization
+    # so we just use float16 or bfloat16 based on CUDA capabilities
+    try:
+        if torch.cuda.is_bf16_supported():
+            model_kwargs["dtype"] = "bfloat16"
+        else:
+            model_kwargs["dtype"] = "float16"
+    except:
+        # Fallback to float16 if bf16 check fails
         model_kwargs["dtype"] = "float16"
     
     # Handle models that require trust_remote_code

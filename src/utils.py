@@ -161,23 +161,40 @@ class HuggingFaceLLMWrapper:
                         except Exception as e:
                             print(f"Warning: Issue moving inputs to GPU: {e}")
                     
-                    outputs = self.model.generate(
-                        **inputs,
-                        do_sample=params["temperature"] > 0,
-                        temperature=max(params["temperature"], 0.01) if params["temperature"] > 0 else 1.0,
-                        top_p=params["top_p"],
-                        max_new_tokens=max_tokens,
-                        num_beams=num_beams,
-                        num_return_sequences=1,
-                        pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
-                        repetition_penalty=1.05,  # Slight penalty for repetition
-                        length_penalty=1.0,
-                        early_stopping=True,
-                        use_cache=True  # Important for memory efficiency
-                    )
+                    # Remove early_stopping from generation flags for models that don't support it
+                    gen_kwargs = {
+                        "do_sample": params["temperature"] > 0,
+                        "temperature": max(params["temperature"], 0.01) if params["temperature"] > 0 else 1.0,
+                        "top_p": params["top_p"],
+                        "max_new_tokens": max_tokens,
+                        "num_beams": num_beams,
+                        "num_return_sequences": 1,
+                        "pad_token_id": self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                        "repetition_penalty": 1.05,  # Slight penalty for repetition
+                        "length_penalty": 1.0,
+                        "use_cache": True  # Important for memory efficiency
+                    }
+                    
+                    # Only add early_stopping for models that support it (not OPT)
+                    if not "opt" in self.name.lower():
+                        gen_kwargs["early_stopping"] = True
+                    
+                    outputs = self.model.generate(**inputs, **gen_kwargs)
                 
-                # Get only the newly generated tokens
-                gen_text = self.tokenizer.decode(outputs[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+                # Get only the newly generated tokens - handling both tensor and list output formats
+                try:
+                    if isinstance(outputs, torch.Tensor):
+                        input_length = inputs["input_ids"].shape[1] if isinstance(inputs["input_ids"], torch.Tensor) else len(inputs["input_ids"][0])
+                        gen_text = self.tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+                    else:
+                        gen_text = self.tokenizer.decode(outputs[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+                except IndexError:
+                    # Fallback for different output formats
+                    gen_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                    # Remove the input prompt from the beginning
+                    original_text = self.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True)
+                    if gen_text.startswith(original_text):
+                        gen_text = gen_text[len(original_text):]
                 
                 # Apply stop tokens if needed
                 if params["stop"] and len(params["stop"]) > 0:
@@ -212,7 +229,20 @@ class HuggingFaceLLMWrapper:
                             use_cache=True
                         )
                     
-                    gen_text = self.tokenizer.decode(outputs[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+                    # Handle output formats consistently using the same approach as in main generation
+                    try:
+                        if isinstance(outputs, torch.Tensor):
+                            input_length = inputs["input_ids"].shape[1] if isinstance(inputs["input_ids"], torch.Tensor) else len(inputs["input_ids"][0])
+                            gen_text = self.tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+                        else:
+                            gen_text = self.tokenizer.decode(outputs[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+                    except IndexError:
+                        # Fallback for different output formats
+                        gen_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                        # Remove the input prompt from the beginning
+                        original_text = self.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True)
+                        if gen_text.startswith(original_text):
+                            gen_text = gen_text[len(original_text):]
                     print(f"Retry succeeded. Generated length: {len(gen_text)}")
                     
                     results.append({

@@ -125,62 +125,45 @@ def main():
             correct_count = 0
             total_count = 0
                 
-            # Evaluate each example
-            for i, example in enumerate(tqdm(ds, desc=f"Evaluating {model_name} on {dataset}")):
-                if i >= len(cot_outputs):
-                    print(f"Warning: Not enough CoT outputs for all examples. Stopping at {i}/{len(ds)}")
-                    break
-                    
-                # Get the correct answer from the dataset
-                if dataset == "aqua_rat":
-                    question = example["question"]
-                    options = example["options"]
-                    correct = example["correct"]
-                elif dataset == "arc_easy" or dataset == "arc":
-                    question = example["question"]
-                    correct = example["answerKey"]
-                elif dataset == "gsm8k":
-                    question = example["question"]
-                    correct = example["answer"]
-                elif dataset == "mmlu" or dataset == "mmlu_math":
-                    question = example["question"]
-                    correct = chr(65 + example["answer"])  # Convert to A, B, C, D
-                else:
-                    continue
+            # Just evaluate each CoT output directly
+            for i, item in enumerate(tqdm(cot_outputs, desc=f"Evaluating {model_name} on {dataset}")):
+                # Get the data from the CoT output
+                question = item.get("question", "")
+                correct_answer = item.get("correct_answer", "") 
                 
-                # Get the corresponding CoT for this example
-                cot = cot_outputs[i]["output"]
+                # Get the CoT output
+                cot = item.get("output", "")
                 if not cot or cot == "[Error: Failed to generate reasoning]":
                     print(f"Warning: Missing or error in CoT for example {i}")
                     results.append({
                         "id": i,
                         "question": question,
-                        "correct": correct,
+                        "correct": correct_answer,
                         "predicted": None,
                         "is_correct": False,
                         "cot": cot
                     })
                     total_count += 1
                     continue
+                
+                # We already extracted the CoT output above, so no need to do it again
                     
                 # Extract the predicted answer
                 predicted = extract_answer(cot)
                 
                 # Check if prediction is correct
                 is_correct = False
-                if predicted:
-                    # Handle different formats of correct answers
-                    if dataset == "aqua_rat" or dataset == "gsm8k":
-                        # These answers might be indices or actual values
-                        try:
-                            if predicted.isdigit() and str(predicted) in str(correct):
-                                is_correct = True
-                            elif predicted == correct:
-                                is_correct = True
-                        except ValueError:
-                            pass
-                    else:  # ARC, MMLU - letter-based answers
-                        is_correct = (predicted.upper() == correct.upper())
+                if predicted and correct_answer:
+                    # In CoT files, the correct_answer is in letter form (A, B, C, etc.)
+                    try:
+                        if predicted.upper() == correct_answer.upper():
+                            is_correct = True
+                        # Also check common formats like "The answer is X"
+                        elif predicted.isdigit() and correct_answer.isdigit() and predicted == correct_answer:
+                            is_correct = True
+                    except Exception as e:
+                        print(f"Error comparing answers for item {i}: {e}")
+                        pass
                 
                 if is_correct:
                     correct_count += 1
@@ -191,7 +174,7 @@ def main():
                 result = {
                     "id": i,
                     "question": question,
-                    "correct": correct,
+                    "correct": correct_answer,
                     "predicted": predicted,
                     "is_correct": is_correct,
                     "cot": cot

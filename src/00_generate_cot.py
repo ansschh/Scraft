@@ -95,11 +95,11 @@ def main():
     import json as j
     model_cfgs = j.load(open(args.model_list))
     
-    # Set sampling parameters for generation
+    # Set sampling parameters for generation - tuned for small models
     sampling_params = SamplingParams(
         temperature=0.7,  # higher temperature for more diverse reasoning
         top_p=0.95,  # nucleus sampling
-        max_tokens=2048,  # allow longer responses for complete reasoning
+        max_tokens=512,  # reduced tokens for faster generation with small models
         stop=["Question:", "\n\n\n"],  # Less aggressive stopping
     )
     

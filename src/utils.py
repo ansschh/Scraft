@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""
-Common utility functions for SCRaFT benchmarking suite.
+"""Common utility functions for SCRaFT benchmarking suite.
 Provides model loading, tokenizer configuration, and other shared functionality.
+Optimized for small models and fast execution.
 """
 
 import os
@@ -36,31 +36,44 @@ def load_model(cfg):
         pass
     
     trust_remote_code = cfg.get("needs_trust", False)
-    device_map = "auto"
+    params_size = cfg.get("params", 0)
     
-    # Check model size to apply appropriate optimizations
-    is_large_model = any(size in model_id.lower() for size in ["7b", "70b", "65b", "33b", "13b", "llama2"])
+    # Only models >5B are considered large models
+    is_large_model = params_size > 5.0 or any(size in model_id.lower() for size in ["7b", "70b", "65b", "33b", "13b", "llama2"])
     
-    # Configure loading parameters
-    model_kwargs = {
-        "device_map": device_map,
-        "torch_dtype": dtype,
-        "trust_remote_code": trust_remote_code
-    }
-    
-    # Apply memory optimizations for large models
-    if is_large_model:
-        print(f"Applying memory optimizations for large model: {model_id}")
-        model_kwargs.update({
-            "low_cpu_mem_usage": True,
-            "offload_folder": "offload_folder",
-            "offload_state_dict": True
-        })
+    # For small models (≤3B params), use simple loading for speed
+    if not is_large_model and params_size <= 3.0:
+        print(f"Fast loading for small model: {model_id} ({params_size}B params)")
+        model_kwargs = {
+            "torch_dtype": dtype,
+            "trust_remote_code": trust_remote_code
+        }
+        # For truly tiny models, we can use the legacy loading path
+        if params_size <= 1.5:
+            print(f"Using single-device loading for tiny model: {model_id}")
+            device_map = "cuda:0" if torch.cuda.is_available() else "cpu"
+            model_kwargs["device_map"] = device_map
+        else:
+            model_kwargs["device_map"] = "auto"
+    else:
+        print(f"Using memory-optimized loading for larger model: {model_id}")
+        model_kwargs = {
+            "device_map": "auto",
+            "torch_dtype": dtype,
+            "trust_remote_code": trust_remote_code,
+            "low_cpu_mem_usage": True
+        }
         
-        # Try to clear CUDA cache before loading
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            print(f"Cleared CUDA cache. Available memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        # Additional optimizations only for truly large models (>5B params)
+        if is_large_model:
+            print(f"Applying heavy memory optimizations for large model: {model_id}")
+            model_kwargs.update({
+                "offload_folder": "offload_folder",
+                "offload_state_dict": True
+            })
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print(f"Cleared CUDA cache. Available memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
     
     # Load model with optimized parameters
     try:
@@ -117,50 +130,68 @@ class HuggingFaceLLMWrapper:
         
         return inputs, params
     
-    def generate(self, prompts, sampling_params=None):
-        """Generate text for the given prompts using HuggingFace generate() API.
-        Memory-optimized for large models.
-        
-        Args:
-            prompts: List of prompt strings
-            sampling_params: An optional SamplingParams instance (compatible with vLLM)
-            
-        Returns:
-            List of dictionaries with generated text
-        """
-        if sampling_params is None:
-            sampling_params = SamplingParams()
-        
+    def generate(self, prompts, sampling_params, prompt_idx=0):
+        """Generate outputs for the given prompts."""
         results = []
+        
+        params = {
+            "temperature": sampling_params.temperature,
+            "top_p": sampling_params.top_p,
+            "max_tokens": sampling_params.max_tokens,
+            "stop": sampling_params.stop
+        }
+        
+        # Get model param size
+        model_size = 0
+        if hasattr(self, 'model_id'):
+            if 'gemma-2b' in self.model_id or '2b' in self.model_id:
+                model_size = 2
+            elif '1.3b' in self.model_id or '1b' in self.model_id or '1.5' in self.model_id:
+                model_size = 1
+            elif '7b' in self.model_id or '13b' in self.model_id:
+                model_size = 7
+        
+        # Process each prompt
         for prompt_idx, prompt in enumerate(prompts):
-            # Clear cache between examples for large models
-            if torch.cuda.is_available() and "7b" in self.name.lower():
+            # Only clear cache for larger models
+            if model_size >= 3 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            inputs, params = self._prepare_inputs(prompt, sampling_params)
+            # Adapt generation parameters based on model size
+            max_tokens = params["max_tokens"]
+            if model_size <= 3:
+                # Smaller models can generate efficiently with default settings
+                pass
+            elif model_size >= 7:
+                # For larger models, reduce the max tokens
+                max_tokens = min(512, max_tokens)
+                print(f"Reduced max tokens to {max_tokens} for large model")
             
+            # Optimize beam search for small models
+            num_beams = 1
+            if model_size <= 3 and params["temperature"] < 0.3:
+                # Use efficient beam search for small models with moderate temperature
+                num_beams = 3
+            
+            # Tokenize input with padding to make compatible across all models
+            inputs = self.tokenizer(prompt, return_tensors="pt", padding=True)
+            
+            # Generate text with error handling
             try:
-                # Reduce max tokens for larger models to avoid OOM
-                max_tokens = params["max_tokens"]
-                if "7b" in self.name.lower() and max_tokens > 512:
-                    print(f"Reducing max_tokens from {max_tokens} to 512 for 7B model")
-                    max_tokens = 512
+                # For 7B, explicitly move inputs to GPU to control memory usage
+                if "7b" in self.name.lower():
+                    try:
+                        for k, v in inputs.items():
+                            if isinstance(v, torch.Tensor):
+                                inputs[k] = v.to("cuda")
+                    except Exception as e:
+                        print(f"Warning: Issue moving inputs to GPU: {e}")
                 
                 # Use beam search only for small models (2B and below)
                 use_beam_search = params["temperature"] < 0.1 and "2b" in self.name.lower()
-                num_beams = 4 if use_beam_search else 1
                 
                 # Generate with input params mapped to HuggingFace params
                 with torch.no_grad():
-                    # For 7B, explicitly move inputs to GPU to control memory usage
-                    if "7b" in self.name.lower():
-                        try:
-                            for k, v in inputs.items():
-                                if isinstance(v, torch.Tensor):
-                                    inputs[k] = v.to("cuda")
-                        except Exception as e:
-                            print(f"Warning: Issue moving inputs to GPU: {e}")
-                    
                     # Remove early_stopping from generation flags for models that don't support it
                     gen_kwargs = {
                         "do_sample": params["temperature"] > 0,
@@ -168,18 +199,18 @@ class HuggingFaceLLMWrapper:
                         "top_p": params["top_p"],
                         "max_new_tokens": max_tokens,
                         "num_beams": num_beams,
-                        "num_return_sequences": 1,
-                        "pad_token_id": self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
-                        "repetition_penalty": 1.05,  # Slight penalty for repetition
-                        "length_penalty": 1.0,
-                        "use_cache": True  # Important for memory efficiency
-                    }
+                    "num_return_sequences": 1,
+                    "pad_token_id": self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                    "repetition_penalty": 1.05,  # Slight penalty for repetition
+                    "length_penalty": 1.0,
+                    "use_cache": True  # Important for memory efficiency
+                }
                     
                     # Only add early_stopping for models that support it (not OPT)
-                    if not "opt" in self.name.lower():
+                if not "opt" in self.name.lower():
                         gen_kwargs["early_stopping"] = True
                     
-                    outputs = self.model.generate(**inputs, **gen_kwargs)
+                outputs = self.model.generate(**inputs, **gen_kwargs)
                 
                 # Get only the newly generated tokens - handling both tensor and list output formats
                 try:

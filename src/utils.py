@@ -12,66 +12,20 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 # Set environment variable for CUDA multiprocessing
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
-# Try to import vLLM, but provide fallback if it fails
-try:
-    from vllm import LLM
-    VLLM_AVAILABLE = True
-except (ImportError, RuntimeError):
-    VLLM_AVAILABLE = False
-    warnings.warn("vLLM not available or failed to initialize. Using Hugging Face Transformers as fallback.")
-
 def load_model(cfg):
     """
     Load a model from Hugging Face based on configuration.
-    Handles tensor parallelism, trust_remote_code, and quantization.
-    Can use vLLM if available or fall back to Hugging Face Transformers.
+    Uses Hugging Face Transformers directly without any quantization.
     
     Args:
         cfg: Model configuration dictionary from models.json
         
     Returns:
-        Either a vLLM LLM instance or a HuggingFaceLLMWrapper
+        HuggingFaceLLMWrapper instance
     """
     model_id = cfg["hf_id"]
     
-    # Try to use vLLM first if available
-    if VLLM_AVAILABLE:
-        try:
-            tp_size = cfg.get("tp", 1)  # Default to 1 if not specified
-            
-            # Configure model options
-            model_kwargs = {
-                "model": model_id,
-                "tensor_parallel_size": tp_size
-            }
-            
-            # Configure dtype - vLLM versions before 0.3.0 don't support 4-bit quantization
-            # so we just use float16 or bfloat16 based on CUDA capabilities
-            try:
-                if torch.cuda.is_bf16_supported():
-                    model_kwargs["dtype"] = "bfloat16"
-                else:
-                    model_kwargs["dtype"] = "float16"
-            except:
-                # Fallback to float16 if bf16 check fails
-                model_kwargs["dtype"] = "float16"
-            
-            # Handle models that require trust_remote_code
-            if cfg.get("needs_trust", False):
-                model_kwargs["trust_remote_code"] = True
-            
-            # Handle Mixtral-specific optimizations
-            if "mixtral" in model_id.lower():
-                model_kwargs["gpu_memory_utilization"] = 0.85
-            
-            # Create and return the LLM instance
-            return LLM(**model_kwargs)
-        except Exception as e:
-            print(f"vLLM initialization failed with error: {e}")
-            print("Falling back to HuggingFace Transformers...")
-    
-    # Fallback to Hugging Face Transformers
-    print(f"Loading {model_id} using Hugging Face Transformers as fallback...")
+    print(f"Loading {model_id} using Hugging Face Transformers...")
     
     # Determine precision and device
     dtype = torch.float16
@@ -84,26 +38,13 @@ def load_model(cfg):
     trust_remote_code = cfg.get("needs_trust", False)
     device_map = "auto"
     
-    # Try 8-bit quantization if model is large
-    use_8bit = False
-    if any(size in model_id.lower() for size in ["70b", "65b", "33b", "34b", "40b"]):
-        use_8bit = True
-        
-    # Load with appropriate parameters
-    if use_8bit:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            device_map=device_map,
-            load_in_8bit=True,
-            trust_remote_code=trust_remote_code
-        )
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id, 
-            device_map=device_map,
-            torch_dtype=dtype,
-            trust_remote_code=trust_remote_code
-        )
+    # Load with appropriate parameters - NO quantization as requested
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, 
+        device_map=device_map,
+        torch_dtype=dtype,
+        trust_remote_code=trust_remote_code
+    )
     
     # Create and return the wrapped model
     return HuggingFaceLLMWrapper(model, model_id, safe_tokenizer(cfg))

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generates vanilla chain-of-thought reasoning for each dataset example.
-Uses vLLM for efficient token generation with paged attention.
+Uses either vLLM or Hugging Face Transformers for token generation.
 """
 
 # Set multiprocessing start method to 'spawn' to avoid CUDA initialization issues
@@ -10,9 +10,16 @@ import torch
 import json
 import os
 from datasets import load_dataset
-from vllm import LLM, SamplingParams
 from tqdm import tqdm
 import argparse
+
+# Import our customized SamplingParams replacement for compatibility
+class SamplingParams:
+    def __init__(self, temperature=0.7, top_p=1.0, max_tokens=512, stop=None):
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_tokens = max_tokens
+        self.stop = stop
 
 # This must be called before any multiprocessing operations
 if __name__ == "__main__":
@@ -83,20 +90,58 @@ def main():
         
         # Process each example
         for i, example in enumerate(tqdm(ds, desc=f"Model: {name}")):
-            if args.dataset == "aqua_rat":
-                question = example["question"]
-                options = example["options"]
-                correct = example["correct"]
-                prompt = build_prompt(question, options)
-            else:  # arc_easy
-                question = example["question"]
-                options = "\n".join([f"{k}: {v}" for k, v in zip(example["choices"]["label"], example["choices"]["text"])])
-                correct = example["answerKey"]
-                prompt = build_prompt(question, options)
+            try:
+                if args.dataset == "aqua_rat":
+                    # Handle both string and dict formats for datasets
+                    if isinstance(example, dict):
+                        question = example["question"]
+                        options = example["options"]
+                        correct = example["correct"]
+                    else:
+                        # Parse the example if it's a string
+                        example_dict = json.loads(example) if isinstance(example, str) else example
+                        question = example_dict["question"]
+                        options = example_dict["options"]
+                        correct = example_dict["correct"]
+                    prompt = build_prompt(question, options)
+                else:  # arc_easy
+                    if isinstance(example, dict):
+                        question = example["question"]
+                        if isinstance(example["choices"], dict):
+                            options = "\n".join([f"{k}: {v}" for k, v in zip(example["choices"]["label"], example["choices"]["text"])])
+                        else:
+                            # Handle different dataset formats
+                            options = "\n".join([f"{c['label']}: {c['text']}" for c in example["choices"]])
+                        correct = example["answerKey"]
+                    else:
+                        # Parse the example if it's a string
+                        example_dict = json.loads(example) if isinstance(example, str) else example
+                        question = example_dict["question"]
+                        if isinstance(example_dict["choices"], dict):
+                            options = "\n".join([f"{k}: {v}" for k, v in zip(example_dict["choices"]["label"], example_dict["choices"]["text"])])
+                        else:
+                            options = "\n".join([f"{c['label']}: {c['text']}" for c in example_dict["choices"]])
+                        correct = example_dict["answerKey"]
+                    prompt = build_prompt(question, options)
+            except Exception as e:
+                print(f"Error processing example {i}: {e}")
+                print(f"Example content: {example}")
+                # Use a simple fallback prompt
+                if isinstance(example, str):
+                    prompt = build_prompt(example)
+                else:
+                    prompt = build_prompt(str(example))
                 
             # Generate CoT
             outputs = llm.generate([prompt], sampling_params)
-            cot = outputs[0].outputs[0].text.strip()
+            
+            # Extract text from output (handle both vLLM and HuggingFace wrapper formats)
+            if hasattr(outputs[0], 'outputs') and hasattr(outputs[0].outputs[0], 'text'):
+                # vLLM format
+                cot = outputs[0].outputs[0].text.strip()
+            else:
+                # HuggingFace wrapper format
+                cot = outputs[0]['output'].strip()
             
             # Store result
             result = {

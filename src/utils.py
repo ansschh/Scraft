@@ -85,6 +85,7 @@ class HuggingFaceLLMWrapper:
     def __init__(self, model, model_id, tokenizer):
         self.model = model
         self.model_id = model_id
+        self.name = model_id  # Add name attribute for compatibility with our code
         self.tokenizer = tokenizer
         self.model.eval()  # Set model to evaluation mode
         

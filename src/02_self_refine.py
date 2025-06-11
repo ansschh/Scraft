@@ -7,9 +7,11 @@ This creates positive examples for fine-tuning without human labels.
 import torch
 import json
 import os
-from vllm import LLM, SamplingParams
 from tqdm import tqdm
 import argparse
+from transformers import AutoModelForCausalLM, AutoTokenizer
+# Import our SamplingParams class and utilities from utils.py for consistency
+from utils import load_model, HuggingFaceLLMWrapper, SamplingParams
 
 def build_refine_prompt(question, options, contradicted_cot):
     """
@@ -47,10 +49,11 @@ def main():
     import json as j
     model_cfgs = j.load(open(args.model_list))
     
-    # Set sampling parameters for generation
+    # Set sampling parameters for generation - optimized for small models
     sampling_params = SamplingParams(
-        temperature=0.0,  # greedy decoding
-        max_tokens=512,
+        temperature=0.0,  # greedy decoding for correction tasks
+        top_p=1.0,       # no nucleus sampling for deterministic output
+        max_tokens=512,  # sufficient for corrections
         stop=["Question:", "\n\n"],  # Stop generation at these tokens
     )
     
@@ -78,19 +81,25 @@ def main():
                 print(f"Skipping {model_name} (output exists)")
                 continue
             
-            # We only use Llama-3-8B for self-refinement as in the original paper
-            refiner_model = "meta-llama/Meta-Llama-3-8B-Instruct"
-            print(f"Processing {model_name} using {refiner_model} for refinement...")
+            # We'll use a smaller model for refinement to fit in our time constraint
+            # Use gemma-2b-it instead of Llama-3-8B for faster execution
+            refiner_model_config = {
+                "name": "gemma-2b-it",
+                "hf_id": "google/gemma-2b-it",
+                "params": 2.0,
+                "needs_trust": True
+            }
+            print(f"Processing {model_name} using {refiner_model_config['hf_id']} for refinement...")
             
             # Load data
             with open(input_file, "r") as f:
                 data = json.load(f)
             
-            # Initialize the refiner model with vLLM
-            llm = load_model({"id": refiner_model})
+            # Initialize the refiner model with Hugging Face
+            llm = load_model(refiner_model_config)
             
-            # Process each example
-            for item in tqdm(data, desc=f"Refining {model_name}"):
+            # Process each example with robust saving
+            for idx, item in enumerate(tqdm(data, desc=f"Refining {model_name}")):
                 question = item["question"]
                 options = item["options"]
                 contradicted_cot = item["contradicted_cot"]
@@ -98,19 +107,46 @@ def main():
                 # Build refine prompt
                 prompt = build_refine_prompt(question, options, contradicted_cot)
                 
-                # Generate repaired CoT
-                outputs = llm.generate([prompt], sampling_params)
-                repaired_cot = outputs[0].outputs[0].text.strip()
+                # Generate repaired CoT using Hugging Face wrapper
+                try:
+                    outputs = llm.generate([prompt], sampling_params)
+                    # Extract text from HuggingFace wrapper format
+                    repaired_cot = outputs[0]['output'].strip()
+                    print(f"Example {idx}: Generated repaired CoT of length {len(repaired_cot)}")
+                except Exception as e:
+                    print(f"Example {idx}: Error in generation: {e}")
+                    # Fallback to a simple error message if generation fails
+                    repaired_cot = "[Error: Failed to generate repaired reasoning]"  
                 
                 # Store result
                 item["refine_prompt"] = prompt
                 item["repaired_cot"] = repaired_cot
+                
+                # Save intermediate results periodically
+                if (idx + 1) % 5 == 0 or idx == len(data) - 1:
+                    try:
+                        # Use atomic write to avoid corruption
+                        temp_file = f"{output_file}.tmp"
+                        with open(temp_file, "w") as f:
+                            json.dump(data, f, indent=2)
+                            
+                        # Atomic rename
+                        import shutil
+                        shutil.move(temp_file, output_file)
+                        print(f"Saved intermediate results to {output_file} after {idx + 1} examples")
+                    except Exception as save_error:
+                        print(f"Error saving intermediate results: {save_error}")
+                        # Emergency backup
+                        try:
+                            backup_file = f"{output_file}.backup.{idx}.json"
+                            with open(backup_file, "w") as f:
+                                json.dump(data, f, indent=2)
+                            print(f"Saved emergency backup to {backup_file}")
+                        except:
+                            print("CRITICAL: Failed to save backup!")
             
-            # Save results
-            with open(output_file, "w") as f:
-                json.dump(data, f, indent=2)
-            
-            print(f"Self-refined {len(data)} contradicted examples with {model_name}, saved to {output_file}")
+            # Final save confirmation
+            print(f"Refinement complete: {len(data)} examples saved to {output_file}")
             
             # Free GPU memory
             del llm

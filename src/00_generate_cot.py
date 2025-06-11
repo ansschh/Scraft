@@ -97,23 +97,32 @@ def main():
     
     # Set sampling parameters for generation
     sampling_params = SamplingParams(
-        temperature=0.4,  # light temperature for better reasoning
+        temperature=0.7,  # higher temperature for more diverse reasoning
         top_p=0.95,  # nucleus sampling
-        max_tokens=1024,  # allow longer responses for complete reasoning
+        max_tokens=2048,  # allow longer responses for complete reasoning
         stop=["Question:", "\n\n\n"],  # Less aggressive stopping
     )
     
     # Process each model
-    for name, cfg in model_cfgs.items():
-        # Set output path for this model
-        out_path = os.path.join(args.output_dir, f"{name}_{args.dataset}_cot.json")
+    for model_name, cfg in model_cfgs.items():
+        # Make sure we use consistent naming - use the name from config or fallback to key
+        name = cfg.get("name", model_name)
+        output_file = os.path.join(args.output_dir, f"{name}_{args.dataset}_cot.json")
         
-        # Skip if already processed
-        if os.path.exists(out_path):
-            print(f"Skipping {name} (output exists)")
-            continue
+        # Delete output file if it exists to ensure a clean run
+        if os.path.exists(output_file):
+            print(f"Removing existing output file {output_file} for clean run...")
+            os.remove(output_file)
+        
+        # Also remove any intermediate results with the same prefix (from previous runs)
+        intermediate_pattern = f"{output_file.replace('.json', '')}*"
+        import glob
+        for intermediate_file in glob.glob(intermediate_pattern):
+            if intermediate_file != output_file and os.path.exists(intermediate_file):
+                print(f"Removing intermediate result file: {intermediate_file}")
+                os.remove(intermediate_file)
             
-        print(f"Processing {name}...")
+        print(f"Processing {name} with clean output state...")
         
         # Load model with Hugging Face through our utils function
         llm = load_model(cfg)
@@ -150,7 +159,7 @@ def main():
                 print(f"Generation error for example {i}: {e}")
                 cot = "Error in generation"
             
-            # Store result
+            # Store the result
             result = {
                 "id": i,
                 "question": question,
@@ -158,14 +167,33 @@ def main():
                 "cot": cot,
                 "correct": correct
             }
-            print(f"Result for example {i} created")
             results.append(result)
-            # Save intermediate results
-            print(f"Saving intermediate results to {out_path}")
-            with open(out_path, "w") as f:
-                json.dump(results, f, indent=2)
+            
+            # Save intermediate results after EVERY example to avoid data loss
+            try:
+                # First write to a temporary file to prevent corruption
+                temp_output_file = f"{output_file}.tmp"
+                with open(temp_output_file, "w") as f:
+                    json.dump(results, f, indent=2)
+                
+                # Then rename to the actual output file (atomic operation)
+                import shutil
+                shutil.move(temp_output_file, output_file)
+                
+                print(f"Saved intermediate results to {output_file} after example {i}")
+            except Exception as save_error:
+                print(f"Error saving results: {save_error}")
+                # Try to save to an emergency backup file
+                try:
+                    backup_file = f"{output_file}.backup.{i}.json"
+                    with open(backup_file, "w") as f:
+                        json.dump(results, f, indent=2)
+                    print(f"Saved emergency backup to {backup_file}")
+                except:
+                    print("CRITICAL: Failed to save backup!")
+                    pass
         
-        print(f"Generated CoT for {len(results)} examples with {name}, saved to {out_path}")
+        print(f"Generated CoT for {len(results)} examples with {name}, saved to {output_file}")
         
         # Free GPU memory
         del llm

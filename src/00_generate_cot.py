@@ -4,6 +4,8 @@ Generates vanilla chain-of-thought reasoning for each dataset example.
 Uses vLLM for efficient token generation with paged attention.
 """
 
+# Set multiprocessing start method to 'spawn' to avoid CUDA initialization issues
+import multiprocessing
 import torch
 import json
 import os
@@ -11,6 +13,10 @@ from datasets import load_dataset
 from vllm import LLM, SamplingParams
 from tqdm import tqdm
 import argparse
+
+# This must be called before any multiprocessing operations
+if __name__ == "__main__":
+    multiprocessing.set_start_method('spawn', force=True)
 
 # Build prompt template - keeping CoT start marker outside user text
 def build_prompt(question, options=None):

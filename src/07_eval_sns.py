@@ -4,6 +4,13 @@ Sentence-Necessity Search (SNS) - greedy deletion of sentences until the model's
 Identifies the minimal set of necessary sentences in the chain of thought.
 """
 
+# Set multiprocessing start method to 'spawn' to avoid CUDA initialization issues
+import multiprocessing
+
+# This must be called before any multiprocessing operations
+if __name__ == "__main__":
+    multiprocessing.set_start_method('spawn', force=True)
+
 import torch
 import json
 import os

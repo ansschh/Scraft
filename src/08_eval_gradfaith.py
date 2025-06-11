@@ -5,6 +5,13 @@ Measures how much each token in the chain-of-thought contributes to the final an
 by taking gradients of the answer token with respect to input embeddings.
 """
 
+# Set multiprocessing start method to 'spawn' to avoid CUDA initialization issues
+import multiprocessing
+
+# This must be called before any multiprocessing operations
+if __name__ == "__main__":
+    multiprocessing.set_start_method('spawn', force=True)
+
 import torch
 import json
 import os

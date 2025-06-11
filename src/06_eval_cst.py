@@ -5,6 +5,11 @@ per example and checks if any mutation flips the answer.
 Uses cached predictions to save compute by only re-evaluating the mutated chain.
 """
 
+# Set multiprocessing start method to 'spawn' to avoid CUDA initialization issues
+import multiprocessing
+if __name__ == "__main__":
+    multiprocessing.set_start_method('spawn', force=True)
+
 import torch
 import json
 import os

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generates vanilla chain-of-thought reasoning for each dataset example.
-Uses either vLLM or Hugging Face Transformers for token generation.
+Uses Hugging Face Transformers for dataset loading and token generation.
 """
 
 # Set multiprocessing start method to 'spawn' to avoid CUDA initialization issues
@@ -13,13 +13,26 @@ from datasets import load_dataset
 from tqdm import tqdm
 import argparse
 
-# Import our customized SamplingParams replacement for compatibility
+# Define a simple Generation Configuration class that's compatible with our code
+from transformers import GenerationConfig
+
 class SamplingParams:
-    def __init__(self, temperature=0.7, top_p=1.0, max_tokens=512, stop=None):
+    """Simple wrapper for generation parameters"""
+    def __init__(self, temperature=0.0, top_p=1.0, max_tokens=512, stop=None):
         self.temperature = temperature
         self.top_p = top_p
         self.max_tokens = max_tokens
         self.stop = stop
+        
+    def to_generation_config(self):
+        """Convert to HF GenerationConfig"""
+        return GenerationConfig(
+            max_new_tokens=self.max_tokens,
+            temperature=self.temperature if self.temperature > 0 else 1.0,
+            do_sample=self.temperature > 0,
+            top_p=self.top_p,
+            # We'll handle stop tokens separately
+        )
 
 # This must be called before any multiprocessing operations
 if __name__ == "__main__":
@@ -53,11 +66,27 @@ def main():
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Load dataset
-    if args.dataset == "aqua_rat":
-        ds = load_dataset("aqua_rat", split="test").shuffle(seed=42)[:args.samples]
-    elif args.dataset == "arc_easy":
-        ds = load_dataset("ai2_arc", "ARC-Easy", split="test").shuffle(seed=42)[:args.samples]
+    # Load dataset with explicit debug output
+    print(f"Loading dataset: {args.dataset}")
+    
+    try:
+        if args.dataset == "aqua_rat":
+            print("Loading aqua_rat from Hugging Face...")
+            ds = load_dataset("aqua_rat", split="validation")
+            print(f"Dataset loaded successfully. Length: {len(ds)}")
+            # Print first example for debugging
+            if len(ds) > 0:
+                print(f"Example structure: {ds[0]}")
+        else:  # arc_easy
+            print("Loading ai2_arc/ARC-Easy from Hugging Face...")
+            ds = load_dataset("ai2_arc", "ARC-Easy", split="test")
+            print(f"Dataset loaded successfully. Length: {len(ds)}")
+            # Print first example for debugging
+            if len(ds) > 0:
+                print(f"Example structure: {ds[0]}")
+    except Exception as e:
+        print(f"Error loading dataset from Hugging Face: {e}")
+        raise
     
     # Load model configurations
     from utils import load_model
@@ -83,80 +112,55 @@ def main():
             
         print(f"Processing {name}...")
         
-        # Load model with vLLM
+        # Load model with Hugging Face through our utils function
         llm = load_model(cfg)
         
         results = []
         
         # Process each example
         for i, example in enumerate(tqdm(ds, desc=f"Model: {name}")):
-            try:
-                if args.dataset == "aqua_rat":
-                    # Handle both string and dict formats for datasets
-                    if isinstance(example, dict):
-                        question = example["question"]
-                        options = example["options"]
-                        correct = example["correct"]
-                    else:
-                        # Parse the example if it's a string
-                        example_dict = json.loads(example) if isinstance(example, str) else example
-                        question = example_dict["question"]
-                        options = example_dict["options"]
-                        correct = example_dict["correct"]
-                    prompt = build_prompt(question, options)
-                else:  # arc_easy
-                    if isinstance(example, dict):
-                        question = example["question"]
-                        if isinstance(example["choices"], dict):
-                            options = "\n".join([f"{k}: {v}" for k, v in zip(example["choices"]["label"], example["choices"]["text"])])
-                        else:
-                            # Handle different dataset formats
-                            options = "\n".join([f"{c['label']}: {c['text']}" for c in example["choices"]])
-                        correct = example["answerKey"]
-                    else:
-                        # Parse the example if it's a string
-                        example_dict = json.loads(example) if isinstance(example, str) else example
-                        question = example_dict["question"]
-                        if isinstance(example_dict["choices"], dict):
-                            options = "\n".join([f"{k}: {v}" for k, v in zip(example_dict["choices"]["label"], example_dict["choices"]["text"])])
-                        else:
-                            options = "\n".join([f"{c['label']}: {c['text']}" for c in example_dict["choices"]])
-                        correct = example_dict["answerKey"]
-                    prompt = build_prompt(question, options)
-            except Exception as e:
-                print(f"Error processing example {i}: {e}")
-                print(f"Example content: {example}")
-                # Use a simple fallback prompt
-                if isinstance(example, str):
-                    prompt = build_prompt(example)
-                else:
-                    prompt = build_prompt(str(example))
+            # Extract data from Hugging Face datasets (already properly structured)
+            if args.dataset == "aqua_rat":
+                question = example["question"]
+                options = example["options"]
+                correct = example["correct"]
+                prompt = build_prompt(question, options)
                 
-            # Generate CoT
-            outputs = llm.generate([prompt], sampling_params)
-            
-            # Extract text from output (handle both vLLM and HuggingFace wrapper formats)
-            if hasattr(outputs[0], 'outputs') and hasattr(outputs[0].outputs[0], 'text'):
-                # vLLM format
-                cot = outputs[0].outputs[0].text.strip()
-            else:
-                # HuggingFace wrapper format
+            else:  # arc_easy
+                question = example["question"]
+                # Format choices consistently
+                options = "\n".join([f"{label}: {text}" 
+                                  for label, text in zip(example["choices"]["label"], 
+                                                       example["choices"]["text"])])
+                correct = example["answerKey"]
+                prompt = build_prompt(question, options)
+                
+            print(f"Generating for example {i}...")
+            # Generate CoT using the HuggingFaceLLMWrapper
+            print(f"Generating for example {i}...")
+            try:
+                outputs = llm.generate([prompt], sampling_params)
+                # Extract text from output using HuggingFace wrapper format
                 cot = outputs[0]['output'].strip()
+                print(f"Generation complete for example {i}")
+            except Exception as e:
+                print(f"Generation error for example {i}: {e}")
+                cot = "Error in generation"
             
             # Store result
             result = {
                 "id": i,
                 "question": question,
                 "options": options,
-                "correct": correct,
-                "prompt": prompt,
-                "cot": cot
+                "cot": cot,
+                "correct": correct
             }
+            print(f"Result for example {i} created")
             results.append(result)
-        
-        # Save results to file for this model
-        with open(out_path, "w") as f:
-            json.dump(results, f, indent=2)
+            # Save intermediate results
+            print(f"Saving intermediate results to {out_path}")
+            with open(out_path, "w") as f:
+                json.dump(results, f, indent=2)
         
         print(f"Generated CoT for {len(results)} examples with {name}, saved to {out_path}")
         

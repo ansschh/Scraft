@@ -83,6 +83,8 @@ class HuggingFaceLLMWrapper:
                 params["top_p"] = sampling_params.top_p
             if hasattr(sampling_params, "max_tokens"):
                 params["max_tokens"] = sampling_params.max_tokens
+            if hasattr(sampling_params, "stop") and sampling_params.stop:
+                params["stop_tokens"] = sampling_params.stop
         
         return inputs, params
     
@@ -93,28 +95,51 @@ class HuggingFaceLLMWrapper:
         for prompt in prompts:
             inputs, params = self._prepare_inputs(prompt, sampling_params)
             
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    do_sample=params["temperature"] > 0,
-                    temperature=params["temperature"],
-                    top_p=params["top_p"],
-                    max_new_tokens=params["max_tokens"],
-                    pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-                )
+            try:
+                print(f"Generating with params: temp={params['temperature']}, top_p={params['top_p']}, max_tokens={params['max_tokens']}")
+                
+                with torch.no_grad():
+                    outputs = self.model.generate(
+                        **inputs,
+                        do_sample=params["temperature"] > 0,
+                        temperature=max(params["temperature"], 0.01) if params["temperature"] > 0 else 1.0,  # Avoid 0 temperature issues
+                        top_p=params["top_p"],
+                        max_new_tokens=params["max_tokens"],
+                        pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+                    )
+                
+                # Get only the newly generated tokens
+                input_length = inputs["input_ids"].shape[1]
+                generated_tokens = outputs[0][input_length:]
+                generated_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+                
+                # Apply stop token handling manually
+                if "stop_tokens" in params and params["stop_tokens"]:
+                    for stop_token in params["stop_tokens"]:
+                        if stop_token in generated_text:
+                            # Truncate at the stop token
+                            generated_text = generated_text.split(stop_token)[0]
+                            break
+                            
+                print(f"Generated text length: {len(generated_text)}")
+                
+                # Create an output structure similar to vLLM's output
+                results.append({
+                    "output": generated_text,
+                    "prompt": prompt,
+                    "finished": True,
+                    "id": 0  # Placeholder id
+                })
+            except Exception as e:
+                print(f"Error during generation: {e}")
+                # Return empty result on error
+                results.append({
+                    "output": f"Error: {str(e)}",
+                    "prompt": prompt,
+                    "finished": False,
+                    "id": 0
+                })
             
-            # Get only the newly generated tokens
-            input_length = inputs["input_ids"].shape[1]
-            generated_tokens = outputs[0][input_length:]
-            generated_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
-            
-            # Create an output structure similar to vLLM's output
-            results.append({
-                "output": generated_text,
-                "prompt": prompt,
-                "finished": True,
-                "id": 0  # Placeholder id
-            })
         
         return results
 
